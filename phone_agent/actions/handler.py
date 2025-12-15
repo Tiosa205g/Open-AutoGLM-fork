@@ -267,48 +267,103 @@ class ActionHandler:
         input(f"{message}\nPress Enter after completing manual operation...")
 
 
+def _extract_call_expression(text: str, func_name: str) -> str | None:
+    """宽松提取第一个形如 func_name(...) 的调用表达式，忽略包装标签与代码块。"""
+    if not isinstance(text, str):
+        return None
+
+    cleaned = text
+    # 去掉 XML/HTML 标签，例如 <answer>...</answer>
+    cleaned = re.sub(r"</?[^>]+>", " ", cleaned)
+    # 去掉 Markdown 代码围栏 ```...```
+    cleaned = re.sub(r"```.*?```", " ", cleaned, flags=re.S)
+    # 去掉思考块前缀 {think}...
+    cleaned = re.sub(r"^\s*\{think\}.*?\s*", " ", cleaned, flags=re.S)
+
+    # 统一常见中文标点与引号为 ASCII，便于 AST 解析
+    cleaned = (
+        cleaned.replace("“", '"')
+        .replace("”", '"')
+        .replace("‘", "'")
+        .replace("’", "'")
+        .replace("：", ":")
+        .replace("，", ",")
+        .strip()
+    )
+
+    # 查找函数名起点
+    m = re.search(fr"\b{func_name}\s*\(", cleaned)
+    if not m:
+        return None
+    i = m.start()
+
+    # 从起点向后匹配括号，找到完整的调用子串
+    depth = 0
+    in_str = False
+    str_ch = ''
+    escape = False
+    for j in range(i, len(cleaned)):
+        ch = cleaned[j]
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == '\\':
+                escape = True
+            elif ch == str_ch:
+                in_str = False
+        else:
+            if ch in ('"', "'"):
+                in_str = True
+                str_ch = ch
+            elif ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+                if depth == 0:
+                    return cleaned[i : j + 1]
+    return None
+
+
 def parse_action(response: str) -> dict[str, Any]:
     """
-    Parse action from model response.
+    解析模型响应为内部动作字典，容忍 <answer> / {think} 等包装。
 
     Args:
-        response: Raw response string from the model.
+        response: 模型原始输出字符串。
 
     Returns:
-        Parsed action dictionary.
+        解析后的动作字典。
 
     Raises:
-        ValueError: If the response cannot be parsed.
+        ValueError: 当无法解析动作时。
     """
     try:
-        response = response.strip()
-        if response.startswith("do"):
-            # Use AST parsing instead of eval for safety
-            try:
-                tree = ast.parse(response, mode='eval')
-                if not isinstance(tree.body, ast.Call):
-                    raise ValueError("Expected a function call")
+        # 优先提取 do(...) 调用
+        expr = _extract_call_expression(response, "do")
+        metadata = "do"
+        if expr is None:
+            # 次优提取 finish(...) 调用
+            expr = _extract_call_expression(response, "finish")
+            metadata = "finish" if expr is not None else None
 
-                call = tree.body
-                # Extract keyword arguments safely
-                action = {"_metadata": "do"}
-                for keyword in call.keywords:
-                    key = keyword.arg
-                    value = ast.literal_eval(keyword.value)
-                    action[key] = value
+        if expr is None or metadata is None:
+            raise ValueError(f"Failed to locate action call in response: {response!r}")
 
-                return action
-            except (SyntaxError, ValueError) as e:
-                raise ValueError(f"Failed to parse do() action: {e}")
+        # 使用 AST 安全解析关键字参数
+        try:
+            tree = ast.parse(expr, mode="eval")
+            if not isinstance(tree.body, ast.Call):
+                raise ValueError("Expected a function call")
 
-        elif response.startswith("finish"):
-            action = {
-                "_metadata": "finish",
-                "message": response.replace("finish(message=", "")[1:-2],
-            }
-        else:
-            raise ValueError(f"Failed to parse action: {response}")
-        return action
+            call = tree.body
+            action: dict[str, Any] = {"_metadata": metadata}
+            for keyword in call.keywords:
+                key = keyword.arg
+                value = ast.literal_eval(keyword.value)
+                action[key] = value
+            return action
+        except (SyntaxError, ValueError) as e:
+            raise ValueError(f"Failed to parse {metadata}() action after sanitization: {e}")
     except Exception as e:
         raise ValueError(f"Failed to parse action: {e}")
 

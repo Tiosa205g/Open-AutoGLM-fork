@@ -126,7 +126,13 @@ def check_system_requirements() -> bool:
     print("3. Checking ADB Keyboard...", end=" ")
     try:
         result = subprocess.run(
-            ["adb", "shell", "ime", "list", "-s"],
+            [
+                "adb",
+                "shell",
+                "su",
+                "-c",
+                '"ime list -s"',
+            ],
             capture_output=True,
             text=True,
             timeout=10,
