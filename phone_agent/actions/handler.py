@@ -292,7 +292,7 @@ def _extract_call_expression(text: str, func_name: str) -> str | None:
     )
 
     # 查找函数名起点
-    m = re.search(fr"\b{func_name}\s*\(", cleaned)
+    m = re.search(rf"\b{func_name}\s*\(", cleaned)
     if not m:
         return None
     i = m.start()
@@ -300,14 +300,14 @@ def _extract_call_expression(text: str, func_name: str) -> str | None:
     # 从起点向后匹配括号，找到完整的调用子串
     depth = 0
     in_str = False
-    str_ch = ''
+    str_ch = ""
     escape = False
     for j in range(i, len(cleaned)):
         ch = cleaned[j]
         if in_str:
             if escape:
                 escape = False
-            elif ch == '\\':
+            elif ch == "\\":
                 escape = True
             elif ch == str_ch:
                 in_str = False
@@ -315,9 +315,9 @@ def _extract_call_expression(text: str, func_name: str) -> str | None:
             if ch in ('"', "'"):
                 in_str = True
                 str_ch = ch
-            elif ch == '(':
+            elif ch == "(":
                 depth += 1
-            elif ch == ')':
+            elif ch == ")":
                 depth -= 1
                 if depth == 0:
                     return cleaned[i : j + 1]
@@ -363,7 +363,9 @@ def parse_action(response: str) -> dict[str, Any]:
                 action[key] = value
             return action
         except (SyntaxError, ValueError) as e:
-            raise ValueError(f"Failed to parse {metadata}() action after sanitization: {e}")
+            raise ValueError(
+                f"Failed to parse {metadata}() action after sanitization: {e}"
+            )
     except Exception as e:
         raise ValueError(f"Failed to parse action: {e}")
 
