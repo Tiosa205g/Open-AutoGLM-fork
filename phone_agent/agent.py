@@ -101,7 +101,10 @@ class PhoneAgent:
             return result.message or "Task completed"
 
         # Continue until finished or max steps reached
-        while self._step_count < self.agent_config.max_steps:
+        while (
+            self._step_count < self.agent_config.max_steps
+            or self.agent_config.max_steps == 0
+        ):
             result = self._execute_step(is_first=False)
 
             if result.finished:

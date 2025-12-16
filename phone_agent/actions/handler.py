@@ -325,9 +325,151 @@ def _extract_call_expression(text: str, func_name: str) -> str | None:
     return None
 
 
+def _extract_dict_literal(text: str) -> str | None:
+    """从文本中宽松提取第一个 {...} 字典字面量，忽略包装标签与代码块。"""
+    if not isinstance(text, str):
+        return None
+
+    cleaned = text
+    # 去掉 XML/HTML 标签
+    cleaned = re.sub(r"</?[^>]+>", " ", cleaned)
+    # 去掉 Markdown 代码围栏
+    cleaned = re.sub(r"```.*?```", " ", cleaned, flags=re.S)
+    # 去掉思考块前缀
+    cleaned = re.sub(r"^\s*\{think\}.*?\s*", " ", cleaned, flags=re.S)
+
+    # 统一中文标点与引号
+    cleaned = (
+        cleaned.replace(
+            """, '"')
+        .replace(""",
+            '"',
+        )
+        .replace("'", "'")
+        .replace("'", "'")
+        .replace("：", ":")
+        .replace("，", ",")
+        .strip()
+    )
+
+    # 找到第一个 { 并匹配到对应的 }
+    m = re.search(r"\{", cleaned)
+    if not m:
+        return None
+    i = m.start()
+
+    depth = 0
+    in_str = False
+    str_ch = ""
+    escape = False
+    for j in range(i, len(cleaned)):
+        ch = cleaned[j]
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == str_ch:
+                in_str = False
+        else:
+            if ch in ('"', "'"):
+                in_str = True
+                str_ch = ch
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return cleaned[i : j + 1]
+    return None
+
+
+def _dict_str_to_python_dict(dict_str: str) -> dict[str, Any]:
+    """
+    将 {action=Swipe, ...} 格式转换为有效的 Python 字典字面量后解析。
+    支持格式：{key=value, key2=value2, ...}
+    """
+    # 移除外层 { }
+    inner = dict_str[1:-1].strip()
+    if not inner:
+        return {}
+
+    # 转换 key=value 为 "key": value（处理嵌套）
+    result_pairs = []
+    depth = 0
+    in_str = False
+    str_ch = ""
+    escape = False
+    current_pair = ""
+
+    for ch in inner:
+        if in_str:
+            current_pair += ch
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == str_ch:
+                in_str = False
+        else:
+            if ch in ('"', "'"):
+                in_str = True
+                str_ch = ch
+                current_pair += ch
+            elif ch in ("[", "{"):
+                depth += 1
+                current_pair += ch
+            elif ch in ("]", "}"):
+                depth -= 1
+                current_pair += ch
+            elif ch == "," and depth == 0:
+                result_pairs.append(current_pair.strip())
+                current_pair = ""
+            else:
+                current_pair += ch
+
+    if current_pair.strip():
+        result_pairs.append(current_pair.strip())
+
+    # 转换每个 key=value 对为 "key": value
+    python_pairs = []
+    for pair in result_pairs:
+        if "=" in pair:
+            key_part, val_part = pair.split("=", 1)
+            key_part = key_part.strip()
+            val_part = val_part.strip()
+
+            # 如果 key 不是字符串，加引号
+            if not (key_part.startswith('"') or key_part.startswith("'")):
+                key_part = f'"{key_part}"'
+
+            # 如果 val_part 是字符串字面量（不以 [、{、数字开头且未被引号包围），加引号
+            if not (
+                val_part.startswith('"')
+                or val_part.startswith("'")
+                or val_part.startswith("[")
+                or val_part.startswith("{")
+                or val_part[0].isdigit()
+                or val_part.lower() in ("true", "false", "none")
+            ):
+                val_part = f'"{val_part}"'
+
+            python_pairs.append(f"{key_part}: {val_part}")
+
+    # 拼接为有效的 Python 字典字面量
+    python_dict_str = "{" + ", ".join(python_pairs) + "}"
+    try:
+        return ast.literal_eval(python_dict_str)
+    except (SyntaxError, ValueError) as e:
+        raise ValueError(
+            f"Failed to parse dict literal '{dict_str}' as Python dict: {e}"
+        )
+
+
 def parse_action(response: str) -> dict[str, Any]:
     """
     解析模型响应为内部动作字典，容忍 <answer> / {think} 等包装。
+    支持格式：do(...)、finish(...)、{action=...}
 
     Args:
         response: 模型原始输出字符串。
@@ -347,26 +489,37 @@ def parse_action(response: str) -> dict[str, Any]:
             expr = _extract_call_expression(response, "finish")
             metadata = "finish" if expr is not None else None
 
-        if expr is None or metadata is None:
-            raise ValueError(f"Failed to locate action call in response: {response!r}")
+        if expr is not None and metadata is not None:
+            # 使用 AST 安全解析关键字参数
+            try:
+                tree = ast.parse(expr, mode="eval")
+                if not isinstance(tree.body, ast.Call):
+                    raise ValueError("Expected a function call")
 
-        # 使用 AST 安全解析关键字参数
-        try:
-            tree = ast.parse(expr, mode="eval")
-            if not isinstance(tree.body, ast.Call):
-                raise ValueError("Expected a function call")
+                call = tree.body
+                action: dict[str, Any] = {"_metadata": metadata}
+                for keyword in call.keywords:
+                    key = keyword.arg
+                    value = ast.literal_eval(keyword.value)
+                    action[key] = value
+                return action
+            except (SyntaxError, ValueError) as e:
+                raise ValueError(
+                    f"Failed to parse {metadata}() action after sanitization: {e}"
+                )
 
-            call = tree.body
-            action: dict[str, Any] = {"_metadata": metadata}
-            for keyword in call.keywords:
-                key = keyword.arg
-                value = ast.literal_eval(keyword.value)
-                action[key] = value
-            return action
-        except (SyntaxError, ValueError) as e:
-            raise ValueError(
-                f"Failed to parse {metadata}() action after sanitization: {e}"
-            )
+        # 如果 do(...) 与 finish(...) 都未找到，尝试 {...} 字典格式
+        dict_str = _extract_dict_literal(response)
+        if dict_str is not None:
+            action = _dict_str_to_python_dict(dict_str)
+            if "action" in action:
+                action["_metadata"] = "do"
+                return action
+            raise ValueError(f"Dict format missing 'action' key: {dict_str}")
+
+        raise ValueError(
+            f"Failed to locate action call or dict in response: {response!r}"
+        )
     except Exception as e:
         raise ValueError(f"Failed to parse action: {e}")
 
