@@ -22,6 +22,7 @@ class AgentConfig:
     lang: str = "cn"
     system_prompt: str | None = None
     verbose: bool = True
+    max_context_messages: int = 20  # Maximum messages in context (excluding system)
 
     def __post_init__(self):
         if self.system_prompt is None:
@@ -103,7 +104,7 @@ class PhoneAgent:
         # Continue until finished or max steps reached
         while (
             self._step_count < self.agent_config.max_steps
-            or self.agent_config.max_steps == 0
+            or self.agent_config.max_steps <= 0
         ):
             result = self._execute_step(is_first=False)
 
@@ -135,6 +136,81 @@ class PhoneAgent:
         """Reset the agent state for a new task."""
         self._context = []
         self._step_count = 0
+
+    def _trim_context(self) -> None:
+        """Trim context to keep only recent messages within token limit."""
+        # If already within budget (max_context_messages + system), keep as-is
+        if len(self._context) <= self.agent_config.max_context_messages + 1:
+            return
+
+        # Anchor messages that must stay at the front:
+        # 1) system prompt
+        # 2) initial user task
+        # 3) first assistant reply (model's initial understanding)
+        system_msg = next(
+            (m for m in self._context if m.get("role") == "system"), self._context[0]
+        )
+        initial_task_msg = next(
+            (m for m in self._context if m.get("role") == "user"), None
+        )
+        first_assistant_msg = next(
+            (m for m in self._context if m.get("role") == "assistant"), None
+        )
+
+        # Preserve anchor order based on their first appearance
+        anchors: list[dict[str, Any]] = []
+        for anchor in (system_msg, initial_task_msg, first_assistant_msg):
+            if anchor and anchor not in anchors:
+                anchors.append(anchor)
+
+        # Remaining messages (excluding anchors)
+        remaining = [m for m in self._context if m not in anchors]
+
+        # Budget excludes the system message
+        available_slots = max(
+            self.agent_config.max_context_messages - (len(anchors) - 1), 0
+        )
+        recent_msgs = remaining[-available_slots:] if available_slots > 0 else []
+
+        # Rebuild context: system first, then other anchors, then recent messages
+        new_context: list[dict[str, Any]] = []
+        if system_msg:
+            new_context.append(system_msg)
+        for anchor in anchors:
+            if anchor is system_msg:
+                continue
+            if anchor not in recent_msgs:
+                new_context.append(anchor)
+        new_context.extend(recent_msgs)
+
+        self._context = new_context
+
+    def _retry_action_request(self, failed_action_text: str) -> dict[str, Any]:
+        """Retry once with a stricter format reminder when action parsing fails."""
+        retry_prompt = (
+            "上一次回复未按格式返回。请仅返回一个动作调用，严格使用以下格式之一：\n"
+            '1) do(action="...", ...)，继续执行任务时使用\n'
+            '2) finish(message="...")，任务完成时使用\n'
+            "不要添加任何其他文本或解释，不要输出自然语言描述。"
+        )
+
+        # Add retry reminder as the latest user message (no image) and trim context
+        self._context.append(MessageBuilder.create_user_message(text=retry_prompt))
+        self._trim_context()
+
+        retry_response = None
+        try:
+            retry_response = self.model_client.request(self._context)
+            return parse_action(retry_response.action)
+        except Exception:
+            if self.agent_config.verbose:
+                traceback.print_exc()
+            fallback_text = (
+                retry_response.action
+                if retry_response is not None
+                else failed_action_text
+            )
+            return finish(message=fallback_text)
 
     def _execute_step(
         self, user_prompt: str | None = None, is_first: bool = False
@@ -172,6 +248,9 @@ class PhoneAgent:
 
         # Get model response
         try:
+            # Trim context to prevent token limit issues
+            self._trim_context()
+
             msgs = get_messages(self.agent_config.lang)
             print("\n" + "=" * 50)
             print(f"💭 {msgs['thinking']}:")
@@ -194,7 +273,7 @@ class PhoneAgent:
         except ValueError:
             if self.agent_config.verbose:
                 traceback.print_exc()
-            action = finish(message=response.action)
+            action = self._retry_action_request(response.action)
 
         if self.agent_config.verbose:
             # Print thinking process

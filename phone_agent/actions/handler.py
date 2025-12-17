@@ -504,6 +504,13 @@ def parse_action(response: str) -> dict[str, Any]:
                     action[key] = value
                 return action
             except (SyntaxError, ValueError) as e:
+                # 对 finish(...) 做更宽容的降级：若 AST 解析失败，直接将原始响应作为 message 兜底
+                if metadata == "finish":
+                    raw_msg = (
+                        response.strip() if isinstance(response, str) else str(response)
+                    )
+                    return {"_metadata": "finish", "message": raw_msg}
+
                 raise ValueError(
                     f"Failed to parse {metadata}() action after sanitization: {e}"
                 )
