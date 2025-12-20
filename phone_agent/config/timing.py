@@ -77,6 +77,64 @@ class DeviceTimingConfig:
 
 
 @dataclass
+class ScreenshotTimingConfig:
+    """Configuration for screenshot operation timing."""
+
+    # Screenshot operation timeouts (in seconds)
+    screencap_timeout: float = 30.0  # Timeout for screencap command on device
+    pull_timeout: float = 10.0  # Timeout for pulling screenshot file from device
+    max_retries: int = 2  # Maximum retry attempts for failed screenshots
+
+    def __post_init__(self):
+        """Load values from environment variables if present."""
+        self.screencap_timeout = float(
+            os.getenv("PHONE_AGENT_SCREENCAP_TIMEOUT", self.screencap_timeout)
+        )
+        self.pull_timeout = float(
+            os.getenv("PHONE_AGENT_PULL_TIMEOUT", self.pull_timeout)
+        )
+        self.max_retries = int(
+            os.getenv("PHONE_AGENT_SCREENSHOT_MAX_RETRIES", self.max_retries)
+        )
+
+
+@dataclass
+class ModelTimingConfig:
+    """Configuration for AI model API timing."""
+
+    # Model API timeouts (in seconds)
+    connect_timeout: float = 30.0  # Timeout for establishing connection to API
+    read_timeout: float = (
+        300.0  # Timeout for reading response (5 minutes for inference)
+    )
+    write_timeout: float = 30.0  # Timeout for sending request
+    pool_timeout: float = 30.0  # Timeout for acquiring connection from pool
+    max_retries: int = 3  # Maximum retry attempts for failed requests
+    retry_delay: float = 2.0  # Delay between retries (seconds)
+
+    def __post_init__(self):
+        """Load values from environment variables if present."""
+        self.connect_timeout = float(
+            os.getenv("PHONE_AGENT_MODEL_CONNECT_TIMEOUT", self.connect_timeout)
+        )
+        self.read_timeout = float(
+            os.getenv("PHONE_AGENT_MODEL_READ_TIMEOUT", self.read_timeout)
+        )
+        self.write_timeout = float(
+            os.getenv("PHONE_AGENT_MODEL_WRITE_TIMEOUT", self.write_timeout)
+        )
+        self.pool_timeout = float(
+            os.getenv("PHONE_AGENT_MODEL_POOL_TIMEOUT", self.pool_timeout)
+        )
+        self.max_retries = int(
+            os.getenv("PHONE_AGENT_MODEL_MAX_RETRIES", self.max_retries)
+        )
+        self.retry_delay = float(
+            os.getenv("PHONE_AGENT_MODEL_RETRY_DELAY", self.retry_delay)
+        )
+
+
+@dataclass
 class ConnectionTimingConfig:
     """Configuration for ADB connection timing delays."""
 
@@ -102,12 +160,16 @@ class TimingConfig:
 
     action: ActionTimingConfig
     device: DeviceTimingConfig
+    screenshot: ScreenshotTimingConfig
+    model: ModelTimingConfig
     connection: ConnectionTimingConfig
 
     def __init__(self):
         """Initialize all timing configurations."""
         self.action = ActionTimingConfig()
         self.device = DeviceTimingConfig()
+        self.screenshot = ScreenshotTimingConfig()
+        self.model = ModelTimingConfig()
         self.connection = ConnectionTimingConfig()
 
 
@@ -129,6 +191,8 @@ def get_timing_config() -> TimingConfig:
 def update_timing_config(
     action: ActionTimingConfig | None = None,
     device: DeviceTimingConfig | None = None,
+    screenshot: ScreenshotTimingConfig | None = None,
+    model: ModelTimingConfig | None = None,
     connection: ConnectionTimingConfig | None = None,
 ) -> None:
     """
@@ -137,6 +201,8 @@ def update_timing_config(
     Args:
         action: New action timing configuration.
         device: New device timing configuration.
+        screenshot: New screenshot timing configuration.
+            model: New model timing configuration.
         connection: New connection timing configuration.
 
     Example:
@@ -152,6 +218,10 @@ def update_timing_config(
         TIMING_CONFIG.action = action
     if device is not None:
         TIMING_CONFIG.device = device
+    if screenshot is not None:
+        TIMING_CONFIG.screenshot = screenshot
+        if model is not None:
+            TIMING_CONFIG.model = model
     if connection is not None:
         TIMING_CONFIG.connection = connection
 
@@ -159,6 +229,8 @@ def update_timing_config(
 __all__ = [
     "ActionTimingConfig",
     "DeviceTimingConfig",
+    "ScreenshotTimingConfig",
+    "ModelTimingConfig",
     "ConnectionTimingConfig",
     "TimingConfig",
     "TIMING_CONFIG",

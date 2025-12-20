@@ -7,8 +7,10 @@ from typing import Any
 
 import httpx
 from openai import OpenAI
+from openai import APITimeoutError, APIConnectionError
 
 from phone_agent.config.i18n import get_message
+from phone_agent.config.timing import TIMING_CONFIG
 
 
 @dataclass
@@ -49,7 +51,26 @@ class ModelClient:
 
     def __init__(self, config: ModelConfig | None = None):
         self.config = config or ModelConfig()
-        self.client = OpenAI(base_url=self.config.base_url, api_key=self.config.api_key)
+
+        # Configure timeout settings
+        timeout_config = httpx.Timeout(
+            connect=TIMING_CONFIG.model.connect_timeout,
+            read=TIMING_CONFIG.model.read_timeout,
+            write=TIMING_CONFIG.model.write_timeout,
+            pool=TIMING_CONFIG.model.pool_timeout,
+        )
+
+        # Create HTTP client with timeout and retry configuration
+        http_client = httpx.Client(
+            timeout=timeout_config,
+            limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+        )
+
+        self.client = OpenAI(
+            base_url=self.config.base_url,
+            api_key=self.config.api_key,
+            http_client=http_client,
+        )
 
     def request(self, messages: list[dict[str, Any]]) -> ModelResponse:
         """
@@ -175,22 +196,46 @@ class ModelClient:
                 total_time=total_time,
             )
 
+        # Retry logic with configurable attempts
+        max_retries = TIMING_CONFIG.model.max_retries
+        retry_delay = TIMING_CONFIG.model.retry_delay
         last_error: Exception | None = None
-        for attempt in range(2):
+
+        for attempt in range(max_retries):
             try:
                 return _stream_once()
+            except (APITimeoutError, APIConnectionError) as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    error_type = (
+                        "timeout"
+                        if isinstance(e, APITimeoutError)
+                        else "connection error"
+                    )
+                    print(
+                        f"\n⚠️ Model request {error_type} (attempt {attempt + 1}/{max_retries}), retrying in {retry_delay}s..."
+                    )
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    print(f"\n❌ Model request failed after {max_retries} attempts")
+                    raise
             except httpx.RemoteProtocolError as e:
                 last_error = e
-                if attempt == 0:
+                if attempt < max_retries - 1:
                     print(
-                        "⚠️ Stream interrupted (RemoteProtocolError), retrying once..."
+                        f"\n⚠️ Stream interrupted (RemoteProtocolError), retrying in {retry_delay}s..."
                     )
-                    time.sleep(0.5)
+                    time.sleep(retry_delay)
                     continue
-                raise
+                else:
+                    print(f"\n❌ Stream failed after {max_retries} attempts")
+                    raise
 
         # If all retries failed, raise the last error
-        raise last_error if last_error else RuntimeError("Unknown streaming error")
+        if last_error:
+            raise last_error
+        raise RuntimeError("Unknown streaming error")
 
     def _parse_response(self, content: str) -> tuple[str, str]:
         """
