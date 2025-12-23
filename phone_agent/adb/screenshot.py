@@ -91,6 +91,8 @@ def _attempt_screenshot(
         adb_prefix + ["shell", "screencap", "-p", "/sdcard/tmp.png"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=screencap_timeout,
     )
 
@@ -104,6 +106,8 @@ def _attempt_screenshot(
         adb_prefix + ["pull", "/sdcard/tmp.png", temp_path],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=pull_timeout,
     )
 
